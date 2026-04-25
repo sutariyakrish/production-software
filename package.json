@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "homepage": "https://sutariyakrish.github.io/prod-software",
+  "homepage": "https://sutariyakrish.github.io/production-software",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
