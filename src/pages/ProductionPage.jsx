@@ -24,12 +24,13 @@ import {
   getActiveAssignments,
   getActiveWorkers,
   getFactoryBeams,
+  getFactoryMachines,
   getMachineStateMap,
   invalidateFactoryCache,
   resolveBeamForDateFromList,
   updateMachineStateCache,
 } from "../services/factoryData";
-import { toDateKey, toMonthKey } from "../utils/date";
+import { formatDisplayDate, toDateKey, toMonthKey } from "../utils/date";
 
 function createClientId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -52,6 +53,8 @@ function createProductionRow(machineNumber, beam, lastTaka = "", overrides = {})
     originalTakaNo: overrides.originalTakaNo ?? "",
     originalWorkerId: overrides.originalWorkerId || "",
     originalWorkerName: overrides.originalWorkerName || "",
+    productionDate: overrides.productionDate || "",
+    shift: overrides.shift || "",
   };
 }
 
@@ -117,6 +120,14 @@ export default function ProductionPage() {
   const [selectedWorkerId, setSelectedWorkerId] = useState("");
   const [productionDate, setProductionDate] = useState(toDateKey());
   const [shift, setShift] = useState("");
+
+  const [entryMode, setEntryMode] = useState("byWorker");
+  const [machines, setMachines] = useState([]);
+  const [selectedMachine, setSelectedMachine] = useState("");
+  const [startDate, setStartDate] = useState(toDateKey());
+  const [endDate, setEndDate] = useState(toDateKey());
+  const [machineWorkers, setMachineWorkers] = useState([]);
+
   const [rows, setRows] = useState([]);
   const [infoText, setInfoText] = useState("");
   const [message, setMessage] = useState({ tone: "neutral", text: "" });
@@ -143,28 +154,61 @@ export default function ProductionPage() {
 
     let isActive = true;
 
-    async function loadWorkers() {
+    async function loadInitialData() {
       try {
-        const nextWorkers = await getActiveWorkers(factoryId, { force: true });
+        const [nextWorkers, nextMachines] = await Promise.all([
+          getActiveWorkers(factoryId, { force: true }),
+          getFactoryMachines(factoryId)
+        ]);
 
         if (isActive) {
           setWorkers(nextWorkers);
+          setMachines(nextMachines);
         }
       } catch (error) {
-        console.error("Production workers load failed:", error);
+        console.error("Production initial data load failed:", error);
 
         if (isActive) {
-          setMessage({ tone: "error", text: "Workers could not be loaded." });
+          setMessage({ tone: "error", text: "Initial data could not be loaded." });
         }
       }
     }
 
-    loadWorkers();
+    loadInitialData();
 
     return () => {
       isActive = false;
     };
   }, [factoryId]);
+
+  useEffect(() => {
+    if (entryMode === "byMachine" && selectedMachine) {
+      let isActive = true;
+      async function findWorkers() {
+        try {
+           const assignments = await getActiveAssignments(factoryId);
+           const machineNum = Number(selectedMachine);
+           const validWorkerIds = assignments.filter(a => {
+              const assignedMachines = expandAssignmentMachines(a.ranges);
+              return assignedMachines.includes(machineNum);
+           }).map(a => a.workerId);
+           
+           if (isActive) {
+             setMachineWorkers(workers.filter(w => validWorkerIds.includes(w.id)));
+             setSelectedWorkerId("");
+             setRows([]);
+             setInfoText("");
+           }
+        } catch (e) {
+           console.error("Failed to find workers for machine", e);
+        }
+      }
+      findWorkers();
+      return () => { isActive = false; };
+    } else {
+      setMachineWorkers(workers);
+    }
+  }, [entryMode, selectedMachine, workers, factoryId]);
 
   useEffect(() => {
     if (!pendingFocus) {
@@ -182,15 +226,24 @@ export default function ProductionPage() {
   }, [pendingFocus, rows]);
 
   useEffect(() => {
-    if (!selectedWorkerId || !productionDate || !shift) {
-      removedRowsRef.current = [];
-      setRows([]);
-      setInfoText("");
-      return;
+    if (entryMode === "byWorker") {
+      if (!selectedWorkerId || !productionDate || !shift) {
+        removedRowsRef.current = [];
+        setRows([]);
+        setInfoText("");
+        return;
+      }
+      loadProductionForEditOrCreate(selectedWorkerId, productionDate, shift);
+    } else {
+      if (!selectedMachine || !selectedWorkerId || !startDate || !endDate || !shift) {
+        removedRowsRef.current = [];
+        setRows([]);
+        setInfoText("");
+        return;
+      }
+      loadProductionForMachineRange(selectedMachine, selectedWorkerId, startDate, endDate, shift);
     }
-
-    loadProductionForEditOrCreate(selectedWorkerId, productionDate, shift);
-  }, [selectedWorkerId, productionDate, shift]);
+  }, [entryMode, selectedWorkerId, productionDate, selectedMachine, startDate, endDate, shift]);
 
   function registerInputRef(rowId, field) {
     return (node) => {
@@ -230,6 +283,8 @@ export default function ProductionPage() {
         originalTakaNo: rowToRemove.originalTakaNo,
         originalWorkerId: rowToRemove.originalWorkerId,
         originalWorkerName: rowToRemove.originalWorkerName,
+        productionDate: rowToRemove.productionDate,
+        shift: rowToRemove.shift,
       });
     }
 
@@ -255,6 +310,9 @@ export default function ProductionPage() {
       const nextRow = createProductionRow(sourceRow.machineNumber, {
         id: sourceRow.beamId,
         beamNo: sourceRow.beamNo,
+      }, "", {
+        productionDate: sourceRow.productionDate,
+        shift: sourceRow.shift
       });
 
       const nextRows = [...currentRows];
@@ -345,8 +403,11 @@ export default function ProductionPage() {
       return (left.data().createdAt?.seconds || 0) - (right.data().createdAt?.seconds || 0);
     });
 
-    const nextRows = sortedDocs.map((docSnap) =>
-      createProductionRow(
+    const nextRows = sortedDocs.map((docSnap) => {
+      const createdAt = docSnap.data().createdAt?.toDate();
+      const dateKeyStr = createdAt ? toDateKey(createdAt) : "";
+
+      return createProductionRow(
         docSnap.data().machineNumber,
         { id: docSnap.data().beamId, beamNo: docSnap.data().beamNo },
         docSnap.data().takaNo,
@@ -355,6 +416,8 @@ export default function ProductionPage() {
           takaNo: docSnap.data().takaNo,
           meters: docSnap.data().meters,
           entryType: docSnap.data().entryType || "normal",
+          productionDate: dateKeyStr,
+          shift: docSnap.data().shift,
           originalMeters: docSnap.data().meters,
           originalEntryType: docSnap.data().entryType || "normal",
           originalBeamId: docSnap.data().beamId,
@@ -363,14 +426,131 @@ export default function ProductionPage() {
           originalWorkerId: docSnap.data().workerId,
           originalWorkerName: docSnap.data().workerName,
         },
-      ),
-    );
+      );
+    });
 
     setRows(nextRows);
     setInfoText("");
 
     if (nextRows.length) {
       setPendingFocus({ rowId: nextRows[0].clientId, field: "meter" });
+    }
+  }
+
+  async function loadProductionForMachineRange(machineNum, workerId, start, end, shiftValue) {
+    removedRowsRef.current = [];
+    setLoadingRows(true);
+    setMessage({ tone: "neutral", text: "" });
+
+    try {
+      const startD = getEntryTimestamp(start, shiftValue);
+      const endD = getEntryTimestamp(end, shiftValue);
+      endD.setHours(23, 59, 59, 999);
+      
+      const snapshot = await getDocs(
+        query(
+          collection(db, "production"),
+          where("factoryId", "==", factoryId),
+          where("machineNumber", "==", Number(machineNum)),
+          where("workerId", "==", workerId),
+          where("shift", "==", shiftValue),
+          where("createdAt", ">=", Timestamp.fromDate(startD)),
+          where("createdAt", "<=", Timestamp.fromDate(endD)),
+        ),
+      );
+
+      const existingDocs = snapshot.docs;
+      
+      const [beams, machineStates] = await Promise.all([
+        getFactoryBeams(factoryId),
+        getMachineStateMap(factoryId, [Number(machineNum)]),
+      ]);
+
+      const nextRows = [];
+      const missingDates = [];
+      
+      const dateKeys = [];
+      let curr = new Date(`${start}T00:00:00`);
+      const endObj = new Date(`${end}T00:00:00`);
+      while (curr <= endObj) {
+        dateKeys.push(toDateKey(curr));
+        curr.setDate(curr.getDate() + 1);
+      }
+
+      const existingByDate = {};
+      existingDocs.forEach(docSnap => {
+         const createdAt = docSnap.data().createdAt?.toDate();
+         const dateKeyStr = createdAt ? toDateKey(createdAt) : "";
+         if (!existingByDate[dateKeyStr]) existingByDate[dateKeyStr] = [];
+         existingByDate[dateKeyStr].push(docSnap);
+      });
+
+      let lastTaka = machineStates[Number(machineNum)]?.lastTaka || "";
+
+      dateKeys.forEach(dateKeyStr => {
+         if (existingByDate[dateKeyStr] && existingByDate[dateKeyStr].length > 0) {
+            const sortedDocs = existingByDate[dateKeyStr].sort((a,b) => (a.data().createdAt?.seconds || 0) - (b.data().createdAt?.seconds || 0));
+            sortedDocs.forEach(docSnap => {
+              nextRows.push(
+                createProductionRow(
+                  machineNum,
+                  { id: docSnap.data().beamId, beamNo: docSnap.data().beamNo },
+                  docSnap.data().takaNo,
+                  {
+                    productionId: docSnap.id,
+                    takaNo: docSnap.data().takaNo,
+                    meters: docSnap.data().meters,
+                    entryType: docSnap.data().entryType || "normal",
+                    productionDate: dateKeyStr,
+                    shift: docSnap.data().shift,
+                    originalMeters: docSnap.data().meters,
+                    originalEntryType: docSnap.data().entryType || "normal",
+                    originalBeamId: docSnap.data().beamId,
+                    originalBeamNo: docSnap.data().beamNo,
+                    originalTakaNo: docSnap.data().takaNo,
+                    originalWorkerId: docSnap.data().workerId,
+                    originalWorkerName: docSnap.data().workerName,
+                  }
+                )
+              );
+              lastTaka = docSnap.data().takaNo;
+            });
+         } else {
+            const entryDate = new Date(`${dateKeyStr}T00:00:00`);
+            const beam = resolveBeamForDateFromList(beams, Number(machineNum), entryDate);
+            if (!beam) {
+               missingDates.push(dateKeyStr);
+            } else {
+               nextRows.push(
+                 createProductionRow(
+                   machineNum,
+                   beam,
+                   lastTaka,
+                   { productionDate: dateKeyStr, shift: shiftValue }
+                 )
+               );
+            }
+         }
+      });
+
+      setRows(nextRows);
+      setInfoText(
+        missingDates.length
+          ? `No active beam found for dates: ${missingDates.join(", ")}. Remaining rows are still editable.`
+          : "",
+      );
+
+      if (nextRows.length) {
+        setPendingFocus({ rowId: nextRows[0].clientId, field: "meter" });
+      }
+
+    } catch (error) {
+      console.error("Production load failed:", error);
+      setRows([]);
+      setInfoText("");
+      setMessage({ tone: "error", text: "Production rows could not be loaded." });
+    } finally {
+      setLoadingRows(false);
     }
   }
 
@@ -454,23 +634,26 @@ export default function ProductionPage() {
         batch.delete(doc(db, "production", productionId));
       });
 
-      const createdAt = Timestamp.fromDate(getEntryTimestamp(productionDate, shift));
-      const dateKey = productionDate;
-      const monthKey = toMonthKey(`${productionDate}T00:00:00`);
+      const dateStats = {};
+      const monthStats = {};
+      const machineDailyDeltas = {};
       const workerDailyDeltas = {};
       const workerDailyNames = {};
       const beamDeltas = {};
-      const machineDailyDeltas = {};
-      const dailyMachineDeltas = {};
-      const monthlyMachineDeltas = {};
-      const dailyWorkerDeltas = {};
-      const monthlyWorkerDeltas = {};
-      const dailyBeamDeltas = {};
-      const dailyTakaDeltas = {};
       const machineStateUpdates = {};
-      let totalDelta = 0;
-      let dayShiftDelta = 0;
-      let nightShiftDelta = 0;
+
+      function getDateStat(dk) {
+        if (!dateStats[dk]) {
+          dateStats[dk] = { totalDelta: 0, dayShiftDelta: 0, nightShiftDelta: 0, machineDeltas: {}, workerDeltas: {}, beamDeltas: {}, takaDeltas: {} };
+        }
+        return dateStats[dk];
+      }
+      function getMonthStat(mk) {
+        if (!monthStats[mk]) {
+          monthStats[mk] = { totalDelta: 0, machineDeltas: {}, workerDeltas: {} };
+        }
+        return monthStats[mk];
+      }
 
       for (const row of rows) {
         const taka = row.takaNo.trim();
@@ -519,6 +702,11 @@ export default function ProductionPage() {
         const oldWorkerIdField = row.productionId ? row.originalWorkerId || "" : "";
         const oldWorkerNameField = row.productionId ? row.originalWorkerName || "" : "";
 
+        const rowDateKey = row.productionDate || productionDate;
+        const rowShift = row.shift || shift;
+        const rowMonthKey = toMonthKey(`${rowDateKey}T00:00:00`);
+        const rowCreatedAt = Timestamp.fromDate(getEntryTimestamp(rowDateKey, rowShift));
+
         const shouldWriteProductionEntry =
           !row.productionId ||
           oldTakaNo !== taka ||
@@ -547,8 +735,8 @@ export default function ProductionPage() {
               workerLabel,
               takaNo: taka,
               meters,
-              shift,
-              createdAt,
+              shift: rowShift,
+              createdAt: rowCreatedAt,
               entryType: row.entryType,
               countInWorker,
               updatedAt: Timestamp.now(),
@@ -557,63 +745,72 @@ export default function ProductionPage() {
           );
         }
 
-        totalDelta += metersDelta;
-        dayShiftDelta += shift === "Day" ? metersDelta : 0;
-        nightShiftDelta += shift === "Night" ? metersDelta : 0;
-        addMetricDelta(machineDailyDeltas, row.machineNumber, metersDelta);
-        addMetricDelta(dailyMachineDeltas, row.machineNumber, metersDelta);
-        addMetricDelta(monthlyMachineDeltas, row.machineNumber, metersDelta);
+        const ds = getDateStat(rowDateKey);
+        const ms = getMonthStat(rowMonthKey);
+
+        ds.totalDelta += metersDelta;
+        ds.dayShiftDelta += rowShift === "Day" ? metersDelta : 0;
+        ds.nightShiftDelta += rowShift === "Night" ? metersDelta : 0;
+
+        addMetricDelta(machineDailyDeltas, `${row.machineNumber}_${rowDateKey}`, metersDelta);
+        addMetricDelta(ds.machineDeltas, row.machineNumber, metersDelta);
+        addMetricDelta(ms.machineDeltas, row.machineNumber, metersDelta);
+        
         addMetricChange(beamDeltas, row.originalBeamId, oldMeters, row.beamId, meters);
-        addMetricChange(dailyBeamDeltas, row.originalBeamNo, oldMeters, row.beamNo, meters);
-        addMetricChange(dailyTakaDeltas, row.originalTakaNo, oldMeters, taka, meters);
-        addMetricChange(dailyWorkerDeltas, oldWorkerName, workerMetersBefore, newWorkerName, workerMetersAfter);
-        addMetricChange(monthlyWorkerDeltas, oldWorkerName, workerMetersBefore, newWorkerName, workerMetersAfter);
-        addMetricChange(workerDailyDeltas, oldWorkerId, workerMetersBefore, newWorkerId, workerMetersAfter);
+        addMetricChange(ds.beamDeltas, row.originalBeamNo, oldMeters, row.beamNo, meters);
+        addMetricChange(ds.takaDeltas, row.originalTakaNo, oldMeters, taka, meters);
+        
+        addMetricChange(ds.workerDeltas, oldWorkerName, workerMetersBefore, newWorkerName, workerMetersAfter);
+        addMetricChange(ms.workerDeltas, oldWorkerName, workerMetersBefore, newWorkerName, workerMetersAfter);
+        
+        addMetricChange(workerDailyDeltas, oldWorkerId ? `${oldWorkerId}_${rowDateKey}` : "", workerMetersBefore, newWorkerId ? `${newWorkerId}_${rowDateKey}` : "", workerMetersAfter);
 
-        if (oldWorkerId) {
-          workerDailyNames[oldWorkerId] = row.originalWorkerName || selectedWorker.name;
+        if (oldWorkerId) workerDailyNames[oldWorkerId] = row.originalWorkerName || selectedWorker.name;
+        if (newWorkerId) workerDailyNames[newWorkerId] = selectedWorker.name;
+
+        if (!machineStateUpdates[row.machineNumber] || new Date(rowDateKey) >= new Date(machineStateUpdates[row.machineNumber].dateKey)) {
+            machineStateUpdates[row.machineNumber] = {
+              lastTaka: taka,
+              beamId: row.beamId,
+              beamNo: row.beamNo,
+              dateKey: rowDateKey
+            };
         }
-
-        if (newWorkerId) {
-          workerDailyNames[newWorkerId] = selectedWorker.name;
-        }
-
-        machineStateUpdates[row.machineNumber] = {
-          lastTaka: taka,
-          beamId: row.beamId,
-          beamNo: row.beamNo,
-        };
       }
 
-      // Apply negative deltas for removed entries (so aggregates stay correct).
       if (removedRows.length) {
         removedRows.forEach((removed) => {
           const oldMeters = Number(removed.originalMeters) || 0;
-          if (oldMeters === 0) {
-            return;
-          }
+          if (oldMeters === 0) return;
 
           const metersDelta = oldMeters * -1;
-          totalDelta += metersDelta;
-          dayShiftDelta += shift === "Day" ? metersDelta : 0;
-          nightShiftDelta += shift === "Night" ? metersDelta : 0;
+          const rowDateKey = removed.productionDate || productionDate;
+          const rowShift = removed.shift || shift;
+          const rowMonthKey = toMonthKey(`${rowDateKey}T00:00:00`);
 
-          addMetricDelta(machineDailyDeltas, removed.machineNumber, metersDelta);
-          addMetricDelta(dailyMachineDeltas, removed.machineNumber, metersDelta);
-          addMetricDelta(monthlyMachineDeltas, removed.machineNumber, metersDelta);
+          const ds = getDateStat(rowDateKey);
+          const ms = getMonthStat(rowMonthKey);
+
+          ds.totalDelta += metersDelta;
+          ds.dayShiftDelta += rowShift === "Day" ? metersDelta : 0;
+          ds.nightShiftDelta += rowShift === "Night" ? metersDelta : 0;
+
+          addMetricDelta(machineDailyDeltas, `${removed.machineNumber}_${rowDateKey}`, metersDelta);
+          addMetricDelta(ds.machineDeltas, removed.machineNumber, metersDelta);
+          addMetricDelta(ms.machineDeltas, removed.machineNumber, metersDelta);
 
           addMetricDelta(beamDeltas, removed.originalBeamId, metersDelta);
-          addMetricDelta(dailyBeamDeltas, removed.originalBeamNo, metersDelta);
-          addMetricDelta(dailyTakaDeltas, removed.originalTakaNo, metersDelta);
+          addMetricDelta(ds.beamDeltas, removed.originalBeamNo, metersDelta);
+          addMetricDelta(ds.takaDeltas, removed.originalTakaNo, metersDelta);
 
           const oldCountInWorker = removed.originalEntryType !== "adjustment";
           const oldWorkerId = oldCountInWorker ? removed.originalWorkerId : "";
           const oldWorkerName = oldCountInWorker ? (removed.originalWorkerName || selectedWorker.name) : "";
           const workerMetersBefore = oldCountInWorker ? oldMeters : 0;
 
-          addMetricChange(dailyWorkerDeltas, oldWorkerName, workerMetersBefore, "", 0);
-          addMetricChange(monthlyWorkerDeltas, oldWorkerName, workerMetersBefore, "", 0);
-          addMetricChange(workerDailyDeltas, oldWorkerId, workerMetersBefore, "", 0);
+          addMetricChange(ds.workerDeltas, oldWorkerName, workerMetersBefore, "", 0);
+          addMetricChange(ms.workerDeltas, oldWorkerName, workerMetersBefore, "", 0);
+          addMetricChange(workerDailyDeltas, oldWorkerId ? `${oldWorkerId}_${rowDateKey}` : "", workerMetersBefore, "", 0);
 
           if (oldWorkerId) {
             workerDailyNames[oldWorkerId] = oldWorkerName || selectedWorker.name;
@@ -629,8 +826,9 @@ export default function ProductionPage() {
         }
       });
 
-      Object.entries(machineDailyDeltas).forEach(([machineNumber, delta]) => {
+      Object.entries(machineDailyDeltas).forEach(([key, delta]) => {
         if (delta !== 0) {
+          const [machineNumber, dateKey] = key.split("_");
           batch.set(
             doc(db, "machine_daily_stats", `${factoryId}_${machineNumber}_${dateKey}`),
             {
@@ -644,8 +842,9 @@ export default function ProductionPage() {
         }
       });
 
-      Object.entries(workerDailyDeltas).forEach(([workerId, delta]) => {
-        if (workerId && delta !== 0) {
+      Object.entries(workerDailyDeltas).forEach(([key, delta]) => {
+        if (key && delta !== 0) {
+          const [workerId, dateKey] = key.split("_");
           batch.set(
             doc(db, "worker_daily_stats", `${factoryId}_${workerId}_${dateKey}`),
             {
@@ -660,37 +859,32 @@ export default function ProductionPage() {
         }
       });
 
-      const dailyPayload = { factoryId, dateKey };
-      const monthlyPayload = { factoryId, monthKey };
+      Object.entries(dateStats).forEach(([dateKey, stats]) => {
+        const dailyPayload = { factoryId, dateKey };
+        if (stats.totalDelta !== 0) dailyPayload.totalMeters = increment(stats.totalDelta);
+        if (stats.dayShiftDelta !== 0) dailyPayload.dayShiftMeters = increment(stats.dayShiftDelta);
+        if (stats.nightShiftDelta !== 0) dailyPayload.nightShiftMeters = increment(stats.nightShiftDelta);
+        applyMetricDeltas(dailyPayload, "machineMap", stats.machineDeltas);
+        applyMetricDeltas(dailyPayload, "workerMap", stats.workerDeltas);
+        applyMetricDeltas(dailyPayload, "beamMap", stats.beamDeltas);
+        applyMetricDeltas(dailyPayload, "takaMap", stats.takaDeltas);
+        queueMergedSet(batch, doc(db, "daily_stats", `${factoryId}_${dateKey}`), dailyPayload);
+      });
 
-      if (totalDelta !== 0) {
-        dailyPayload.totalMeters = increment(totalDelta);
-        monthlyPayload.totalMeters = increment(totalDelta);
-      }
-
-      if (dayShiftDelta !== 0) {
-        dailyPayload.dayShiftMeters = increment(dayShiftDelta);
-      }
-
-      if (nightShiftDelta !== 0) {
-        dailyPayload.nightShiftMeters = increment(nightShiftDelta);
-      }
-
-      applyMetricDeltas(dailyPayload, "machineMap", dailyMachineDeltas);
-      applyMetricDeltas(dailyPayload, "workerMap", dailyWorkerDeltas);
-      applyMetricDeltas(dailyPayload, "beamMap", dailyBeamDeltas);
-      applyMetricDeltas(dailyPayload, "takaMap", dailyTakaDeltas);
-      applyMetricDeltas(monthlyPayload, "machineMap", monthlyMachineDeltas);
-      applyMetricDeltas(monthlyPayload, "workerMap", monthlyWorkerDeltas);
-
-      queueMergedSet(batch, doc(db, "daily_stats", `${factoryId}_${dateKey}`), dailyPayload);
-      queueMergedSet(batch, doc(db, "monthly_stats", `${factoryId}_${monthKey}`), monthlyPayload);
+      Object.entries(monthStats).forEach(([monthKey, stats]) => {
+        const monthlyPayload = { factoryId, monthKey };
+        if (stats.totalDelta !== 0) monthlyPayload.totalMeters = increment(stats.totalDelta);
+        applyMetricDeltas(monthlyPayload, "machineMap", stats.machineDeltas);
+        applyMetricDeltas(monthlyPayload, "workerMap", stats.workerDeltas);
+        queueMergedSet(batch, doc(db, "monthly_stats", `${factoryId}_${monthKey}`), monthlyPayload);
+      });
 
       Object.entries(machineStateUpdates).forEach(([machineNumber, state]) => {
+        const { dateKey, ...cleanState } = state;
         batch.set(
           doc(db, "machine_state", `${factoryId}_${machineNumber}`),
           {
-            ...state,
+            ...cleanState,
             updatedAt: Timestamp.now(),
           },
           { merge: true },
@@ -713,7 +907,11 @@ export default function ProductionPage() {
 
       // Avoid a full refetch when nothing changed (keeps the "Save" button responsive).
       if (didWriteProductionDocs) {
-        await loadProductionForEditOrCreate(selectedWorkerId, productionDate, shift);
+        if (entryMode === "byWorker") {
+          await loadProductionForEditOrCreate(selectedWorkerId, productionDate, shift);
+        } else {
+          await loadProductionForMachineRange(selectedMachine, selectedWorkerId, startDate, endDate, shift);
+        }
       }
       setMessage({ tone: "neutral", text: "" });
       showToast({ tone: "success", message: "Production saved successfully." });
@@ -738,49 +936,132 @@ export default function ProductionPage() {
 
       <PageCard>
         <SectionIntro
-          eyebrow="Entry"
+          eyebrow="Entry Mode"
           title="Shift production"
-          description="Select the worker, date, and shift to load saved rows or generate the current assignment set."
+          description="Choose how you want to enter production."
         />
-
-        <div className="form-grid form-grid--filters">
-          <FormField label="Date" htmlFor="productionDate">
-            <input
-              id="productionDate"
-              type="date"
-              value={productionDate}
-              onChange={(event) => setProductionDate(event.target.value)}
+        
+        <div style={{ marginBottom: "24px", display: "flex", gap: "16px" }}>
+          <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
+            <input 
+              type="radio" 
+              name="entryMode" 
+              value="byWorker" 
+              checked={entryMode === "byWorker"} 
+              onChange={() => setEntryMode("byWorker")} 
             />
-          </FormField>
-
-          <FormField label="Worker" htmlFor="workerSelect">
-            <select
-              id="workerSelect"
-              value={selectedWorkerId}
-              onChange={(event) => setSelectedWorkerId(event.target.value)}
-            >
-              <option value="">Select Worker</option>
-              {workers.map((worker) => (
-                <option key={worker.id} value={worker.id}>
-                  {worker.displayName}
-                </option>
-              ))}
-            </select>
-          </FormField>
-
-          <FormField label="Shift" htmlFor="shiftSelect">
-            <select id="shiftSelect" value={shift} onChange={(event) => setShift(event.target.value)}>
-              <option value="">Select Shift</option>
-              <option value="Day">Day</option>
-              <option value="Night">Night</option>
-            </select>
-          </FormField>
+            By Worker
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
+            <input 
+              type="radio" 
+              name="entryMode" 
+              value="byMachine" 
+              checked={entryMode === "byMachine"} 
+              onChange={() => setEntryMode("byMachine")} 
+            />
+            By Machine (Date Range)
+          </label>
         </div>
+
+        {entryMode === "byWorker" ? (
+          <div className="form-grid form-grid--filters">
+            <FormField label="Date" htmlFor="productionDate">
+              <input
+                id="productionDate"
+                type="date"
+                value={productionDate}
+                onChange={(event) => setProductionDate(event.target.value)}
+              />
+            </FormField>
+
+            <FormField label="Worker" htmlFor="workerSelect">
+              <select
+                id="workerSelect"
+                value={selectedWorkerId}
+                onChange={(event) => setSelectedWorkerId(event.target.value)}
+              >
+                <option value="">Select Worker</option>
+                {workers.map((worker) => (
+                  <option key={worker.id} value={worker.id}>
+                    {worker.displayName}
+                  </option>
+                ))}
+              </select>
+            </FormField>
+
+            <FormField label="Shift" htmlFor="shiftSelect">
+              <select id="shiftSelect" value={shift} onChange={(event) => setShift(event.target.value)}>
+                <option value="">Select Shift</option>
+                <option value="Day">Day</option>
+                <option value="Night">Night</option>
+              </select>
+            </FormField>
+          </div>
+        ) : (
+          <div className="form-grid form-grid--filters">
+            <FormField label="Machine" htmlFor="machineSelect">
+              <select
+                id="machineSelect"
+                value={selectedMachine}
+                onChange={(event) => setSelectedMachine(event.target.value)}
+              >
+                <option value="">Select Machine</option>
+                {machines.map((m) => (
+                  <option key={m.id} value={m.machineNumber}>
+                    Machine {m.machineNumber}
+                  </option>
+                ))}
+              </select>
+            </FormField>
+            
+            <FormField label="Start Date" htmlFor="startDate">
+              <input
+                id="startDate"
+                type="date"
+                value={startDate}
+                onChange={(event) => setStartDate(event.target.value)}
+              />
+            </FormField>
+
+            <FormField label="End Date" htmlFor="endDate">
+              <input
+                id="endDate"
+                type="date"
+                value={endDate}
+                onChange={(event) => setEndDate(event.target.value)}
+              />
+            </FormField>
+
+            <FormField label="Worker" htmlFor="workerSelect">
+              <select
+                id="workerSelect"
+                value={selectedWorkerId}
+                onChange={(event) => setSelectedWorkerId(event.target.value)}
+              >
+                <option value="">Select Worker</option>
+                {machineWorkers.map((worker) => (
+                  <option key={worker.id} value={worker.id}>
+                    {worker.displayName}
+                  </option>
+                ))}
+              </select>
+            </FormField>
+
+            <FormField label="Shift" htmlFor="shiftSelect">
+              <select id="shiftSelect" value={shift} onChange={(event) => setShift(event.target.value)}>
+                <option value="">Select Shift</option>
+                <option value="Day">Day</option>
+                <option value="Night">Night</option>
+              </select>
+            </FormField>
+          </div>
+        )}
 
         <DataTable className="production-table" wrapperClassName="table-scroll--tall">
           <thead>
             <tr>
-              <th>Machine</th>
+              <th>{entryMode === "byMachine" ? "Date" : "Machine"}</th>
               <th>Beam</th>
               <th>Taka No</th>
               <th>Meters</th>
@@ -795,7 +1076,12 @@ export default function ProductionPage() {
                   key={row.clientId}
                   className={row.entryType === "adjustment" ? "production-row production-row--adjustment" : "production-row"}
                 >
-                  <td>{`Machine ${row.machineNumber}`}</td>
+                  <td>
+                    {entryMode === "byMachine" 
+                      ? (row.productionDate ? formatDisplayDate(row.productionDate) : `Machine ${row.machineNumber}`)
+                      : `Machine ${row.machineNumber}`
+                    }
+                  </td>
                   <td>{row.beamNo}</td>
                   <td>
                     <input
