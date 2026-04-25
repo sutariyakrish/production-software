@@ -1,0 +1,1 @@
+import{j as e}from"./index-CyFXdV1s.js";function m({title:n,description:l,action:s=null,compact:t=!1}){return e.jsxs("div",{className:`empty-panel ${t?"empty-panel--compact":""}`.trim(),children:[e.jsxs("div",{children:[e.jsx("h3",{children:n}),l?e.jsx("p",{children:l}):null]}),s?e.jsx("div",{className:"empty-panel__action",children:s}):null]})}export{m as E};
