@@ -1,0 +1,1 @@
+import{j as a}from"./index-FRvCf50o.js";function l({children:t,className:s="",wrapperClassName:e=""}){return a.jsx("div",{className:`table-scroll ${e}`.trim(),children:a.jsx("table",{className:`app-table ${s}`.trim(),children:t})})}export{l as D};
