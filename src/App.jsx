@@ -8,6 +8,8 @@ import { useFactory } from "./contexts/FactoryContext";
 const BeamsPage = lazy(() => import("./pages/BeamsPage"));
 const DashboardPage = lazy(() => import("./pages/DashboardPage"));
 const FactoriesPage = lazy(() => import("./pages/FactoriesPage"));
+const FloorsPage = lazy(() => import("./pages/FloorsPage"));
+const FloorStatsPage = lazy(() => import("./pages/FloorStatsPage"));
 const LoginPage = lazy(() => import("./pages/LoginPage"));
 const ProductionPage = lazy(() => import("./pages/ProductionPage"));
 const ReportsPage = lazy(() => import("./pages/ReportsPage"));
@@ -93,6 +95,8 @@ export default function App() {
             <Route path="/beams" element={renderPage(BeamsPage)} />
             <Route path="/production" element={renderPage(ProductionPage)} />
             <Route path="/reports" element={renderPage(ReportsPage)} />
+            <Route path="/floors" element={renderPage(FloorsPage)} />
+            <Route path="/floor-stats" element={renderPage(FloorStatsPage)} />
           </Route>
         </Route>
       </Route>

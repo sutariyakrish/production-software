@@ -12,6 +12,8 @@ const navItems = [
   { to: "/beams", label: "Beams" },
   { to: "/production", label: "Production" },
   { to: "/reports", label: "Reports" },
+  { to: "/floor-stats", label: "Floor Stats" },
+  { to: "/floors", label: "Floor Setup" },
 ];
 
 export default function Navbar({ factoryName }) {

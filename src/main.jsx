@@ -8,6 +8,7 @@ import { ThemeProvider } from "./contexts/ThemeContext";
 import { ToastProvider } from "./contexts/ToastContext";
 
 import "./styles/index.css";
+import "./styles/floors.css";
 
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>
